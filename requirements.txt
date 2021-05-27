@@ -1,0 +1,8 @@
+torch
+gym
+gym[atari]
+numpy
+filelock
+pillow
+six
+pfrl
