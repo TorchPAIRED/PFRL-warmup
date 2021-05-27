@@ -153,6 +153,20 @@ def main():
         default=None,
         help="Frequency at which agents are stored.",
     )
+
+    parser.add_argument(
+        "--diayn-use",
+        type=bool,
+        default=False,
+        help="Wether or not we should use diayn",
+    )
+    parser.add_argument(
+        "--diayn-n-skills",
+        type=int,
+        default=6,
+        help="Number of skills to train",
+    )
+
     args = parser.parse_args()
 
     import logging
@@ -171,7 +185,7 @@ def main():
     args.outdir = experiments.prepare_output_dir(args, args.outdir)
     print("Output files are saved in {}".format(args.outdir))
 
-    def make_env(idx, test):
+    def make_env(idx, test, discriminator):
         # Use different random seeds for train and test envs
         process_seed = int(process_seeds[idx])
         env_seed = 2 ** 32 - 1 - process_seed if test else process_seed
@@ -183,6 +197,14 @@ def main():
             frame_stack=False,
         )
         env.seed(env_seed)
+
+        if args.diayn_use:
+            from diayn_sim import DIAYNWrapper
+            def augment_obs(obs, z):
+                obs[:, 1:4, :] = z
+                return obs
+            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, augment_obs_func=augment_obs)
+
         if args.monitor:
             env = pfrl.wrappers.Monitor(
                 env, args.outdir, mode="evaluation" if test else "training"
@@ -191,18 +213,46 @@ def main():
             env = pfrl.wrappers.Render(env)
         return env
 
-    def make_batch_env(test):
+    def make_batch_env(test, discriminator):
         vec_env = pfrl.envs.MultiprocessVectorEnv(
             [
-                (lambda: make_env(idx, test))
+                (lambda: make_env(idx, test, discriminator))
                 for idx, env in enumerate(range(args.num_envs))
             ]
         )
         if not args.no_frame_stack:
-            vec_env = pfrl.wrappers.VectorFrameStack(vec_env, 4)    # todo why frame stack here and not in make env?
+            vec_env = pfrl.wrappers.VectorFrameStack(vec_env, 4)
         return vec_env
 
-    sample_env = make_batch_env(test=False)
+    discriminator = None
+    if args.diayn_use:
+        from diayn_sim import Discriminator
+
+        def preprocess(input):
+            # don't care about framestack since here we only care about the STATES, not trajectory
+            # also, we want a batch of vectors, not matrices
+
+            input = torch.tensor(input)
+
+            input_shape_len = len(list(input.shape))
+
+            assert input_shape_len == 3, f"input shape for discrimnator must be 3; it is {input_shape_len}"
+
+            flattened = torch.flatten(input, start_dim=1).to(torch.float32)
+
+            flattened -= flattened.min(1, keepdim=True)[0]
+            flattened /= flattened.max(1, keepdim=True)[0]
+
+            return flattened
+
+        discriminator = Discriminator(
+            input_size=7056,
+            layers=(300,300),
+            n_skills=args.diayn_n_skills,
+            preprocess=preprocess
+        ).cuda()
+
+    sample_env = make_batch_env(test=False, discriminator=discriminator)
     print("Observation space", sample_env.observation_space)
     print("Action space", sample_env.action_space)
     n_actions = sample_env.action_space.n
@@ -313,8 +363,8 @@ def main():
 
         experiments.train_agent_batch_with_evaluation(
             agent=agent,
-            env=make_batch_env(False),
-            eval_env=make_batch_env(True),
+            env=make_batch_env(False, discriminator),
+            eval_env=make_batch_env(True, discriminator),
             outdir=args.outdir,
             steps=args.steps,
             eval_n_steps=None,
