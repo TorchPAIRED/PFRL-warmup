@@ -124,7 +124,7 @@ class DIAYNWrapper(VectorEnvWrapper):
             #print(logits)
             from torch.nn.functional import cross_entropy
             reward_pls = -1 * cross_entropy(logits, self._z, reduction="none")   # todo probably pass one_hot as part of action, and split it from action before self.env.step
-            print(reward_pls)
+            #print(reward_pls)
             # todo wtf is self._p_z_pl?
             # https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L184
             # isnt p_z a static?
