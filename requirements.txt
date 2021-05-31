@@ -7,3 +7,4 @@ pillow
 six
 matplotlib
 pfrl
+mujoco-py

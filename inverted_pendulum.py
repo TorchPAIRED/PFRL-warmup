@@ -7,7 +7,9 @@ To train PPO using a recurrent model on a flickering Atari env, run:
     python train_ppo_ale.py --recurrent --flicker --no-frame-stack
 """
 import argparse
+import os
 
+import gym
 import numpy as np
 import torch
 from torch import nn
@@ -15,14 +17,14 @@ from torch import nn
 import pfrl
 from pfrl import experiments, utils
 from pfrl.agents import PPO
-from pfrl.policies import SoftmaxCategoricalHead
+from pfrl.policies import SoftmaxCategoricalHead, GaussianHeadWithFixedCovariance
 from pfrl.wrappers import atari_wrappers
 #torch.multiprocessing.set_start_method('spawn')
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--env", type=str, default="BreakoutNoFrameskip-v4", help="Gym Env ID."
+        "--env", type=str, default="InvertedPendulum-v2", help="Gym Env ID."
     )
     parser.add_argument(
         "--gpu", type=int, default=0, help="GPU device ID. Set to -1 to use CPUs only."
@@ -183,7 +185,6 @@ def main():
     args = parser.parse_args()
 
     import logging
-
     logging.basicConfig(level=args.log_level)
 
     # Set a random seed used in PFRL.
@@ -199,26 +200,27 @@ def main():
     print("Output files are saved in {}".format(args.outdir))
 
     def make_env(idx, test, discriminator):
+        env = gym.make(args.env)
         # Use different random seeds for train and test envs
         process_seed = int(process_seeds[idx])
         env_seed = 2 ** 32 - 1 - process_seed if test else process_seed
-        env = atari_wrappers.wrap_deepmind(
-            atari_wrappers.make_atari(args.env, max_frames=args.max_frames),
-            episode_life=not test,
-            clip_rewards=not test,
-            flicker=args.flicker,
-            frame_stack=False,
-        )
         env.seed(env_seed)
+
+        env = pfrl.wrappers.CastObservationToFloat32(env)
+
         if args.monitor:
             env = pfrl.wrappers.Monitor(
                 env, args.outdir, mode="evaluation" if test else "training"
             )
+        if not test and not args.diayn_use:
+            # Scale rewards (and thus returns) to a reasonable range so that
+            # training is easier
+            env = pfrl.wrappers.ScaleReward(env, 1e-2)  # todo add to args https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L45
         if args.render:
             env = pfrl.wrappers.Render(env)
         return env
 
-    def make_batch_env(test, discriminator):
+    def make_batch_env(test, discriminator, force_no_diayn=False):  # force_no_diayn is used to compte the obs space for DIAYN
         env_funs = []
         for idx, env in enumerate(range(args.num_envs)):
             def _temp():
@@ -229,27 +231,10 @@ def main():
         vec_env = pfrl.envs.MultiprocessVectorEnv(
             env_funs
         )
-        if not args.no_frame_stack:
-            vec_env = pfrl.wrappers.VectorFrameStack(vec_env, 4)
 
-        if args.diayn_use:
+        if not force_no_diayn and args.diayn_use:
             from diayn_sim import DIAYNWrapper
-            def augment_obs(obs, z):
-                for envs in obs:
-                    for frame in envs._frames:
-                        #import matplotlib.pyplot as plt
-                        #plt.imshow(np.squeeze(frame, axis=0))
-                        #plt.show()
-
-                        frame[:, :, 0:4] = z # just in case there is some collapsing going on with too-small values
-
-                        #import matplotlib.pyplot as plt
-                        #plt.imshow(np.squeeze(frame, axis=0))
-                        #plt.show()
-
-                return obs
-            vec_env = DIAYNWrapper(vec_env, discriminator, args.diayn_n_skills, augment_obs_func=augment_obs)
-
+            vec_env = DIAYNWrapper(vec_env, discriminator, args.diayn_n_skills)
 
         return vec_env
 
@@ -257,98 +242,58 @@ def main():
     if args.diayn_use:
         from diayn_sim import Discriminator
 
-        pooler = torch.nn.MaxPool2d(3, )
-        def preprocess(input):
-            # don't care about framestack since here we only care about the STATES, not trajectory
-            # also, we want a batch of vectors, not matrices
-
-            frames = np.array([inpu.__array__() for inpu in input])
-            frames = torch.tensor(frames)[:,-1,:,:] # take latest frame only
-            frames = pooler(frames.float())
-
-            flattened = torch.flatten(frames, start_dim=1).to(torch.float32)
-
-            flattened -= flattened.min(1, keepdim=True)[0]
-            flattened /= flattened.max(1, keepdim=True)[0]
-
-            return flattened
+        sample_env = make_batch_env(test=False, discriminator=None, force_no_diayn=True)
+        obs_space = sample_env.observation_space.shape
+        print("Old observation space", sample_env.observation_space)
+        print("Old action space", sample_env.action_space)
+        del sample_env
 
         discriminator = Discriminator(
-            input_size=784,
-            layers=(300,200),
-            n_skills=args.diayn_n_skills,
-            preprocess=preprocess
+            input_size=obs_space,
+            layers=(200,200),
+            n_skills=args.diayn_n_skills
         ).cuda()
 
     sample_env = make_batch_env(test=False, discriminator=discriminator)
     print("Observation space", sample_env.observation_space)
     print("Action space", sample_env.action_space)
-    n_actions = sample_env.action_space.n
-    obs_n_channels = sample_env.observation_space.low.shape[0]
+    action_space = sample_env.action_space
+    timestep_limit = sample_env.spec.max_episode_steps
+    obs_space = sample_env.observation_space
+    obs_size = obs_space.low.size
+    hidden_size = 200   # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
     del sample_env
 
-    def lecun_init(layer, gain=1):
-        if isinstance(layer, (nn.Conv2d, nn.Linear)):
-            pfrl.initializers.init_lecun_normal(layer.weight, gain)
-            nn.init.zeros_(layer.bias)
-        else:
-            pfrl.initializers.init_lecun_normal(layer.weight_ih_l0, gain)
-            pfrl.initializers.init_lecun_normal(layer.weight_hh_l0, gain)
-            nn.init.zeros_(layer.bias_ih_l0)
-            nn.init.zeros_(layer.bias_hh_l0)
-        return layer
-
-    if args.recurrent:
-        model = pfrl.nn.RecurrentSequential(
-            lecun_init(nn.Conv2d(obs_n_channels, 32, 8, stride=4)),
-            nn.ReLU(),
-            lecun_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            lecun_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            lecun_init(nn.Linear(3136, 512)),
-            nn.ReLU(),
-            lecun_init(nn.GRU(num_layers=1, input_size=512, hidden_size=512)),
+    if isinstance(action_space, gym.spaces.Box):
+        model = nn.Sequential(
+            nn.Linear(obs_size, hidden_size),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LeakyReLU(0.2),
             pfrl.nn.Branched(
                 nn.Sequential(
-                    lecun_init(nn.Linear(512, n_actions), 1e-2),
-                    SoftmaxCategoricalHead(),
+                    nn.Linear(hidden_size, action_space.low.size),
+                    GaussianHeadWithFixedCovariance(0.3),
                 ),
-                lecun_init(nn.Linear(512, 1)),
+                nn.Linear(hidden_size, 1),
             ),
         )
     else:
         model = nn.Sequential(
-            lecun_init(nn.Conv2d(obs_n_channels, 32, 8, stride=4)),
-            nn.ReLU(),
-            lecun_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            lecun_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            lecun_init(nn.Linear(3136, 512)),
-            nn.ReLU(),
-            pfrl.nn.Branched(
-                nn.Sequential(
-                    lecun_init(nn.Linear(512, n_actions), 1e-2),
-                    SoftmaxCategoricalHead(),
-                ),
-                lecun_init(nn.Linear(512, 1)),
-            ),
+            nn.Linear(obs_size, hidden_size),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LeakyReLU(0.2),
+            nn.Linear(hidden_size, action_space.n),
+            SoftmaxCategoricalHead(),
         )
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-5)
-
-    def phi(x):
-        # Feature extractor
-        return np.asarray(x, dtype=np.float32) / 255
 
     agent = PPO(
         model,
         opt,
         gpu=args.gpu,
-        phi=phi,
         update_interval=args.update_interval,
         minibatch_size=args.batchsize,
         epochs=args.epochs,
