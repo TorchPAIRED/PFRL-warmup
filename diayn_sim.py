@@ -46,11 +46,12 @@ class Discriminator(nn.Module):
         return logits
 
 class DIAYNWrapper(VectorEnvWrapper):
-    def __init__(self, env, discriminator, n_skills):
+    def __init__(self, env, discriminator, n_skills, is_evaluator=False):
 
         # The next lines spoof the original env
         super().__init__(env)
         self.env = env
+        self.is_evaluator = is_evaluator
 
         # need to augment by z, so this is one bigger
         # todo for more complicated envs, will need a better way to do this..
@@ -101,6 +102,7 @@ class DIAYNWrapper(VectorEnvWrapper):
         self.logger.info(f"disc loss: {self.latest_loss}")
         self.logger.info(f"top extrinsic: {self.top_extrinsic}")
         self.logger.info(f"last intrinsic: {self.last_intrisic}")
+        self.top_extrinsic = None
 
     def augment_obs(self, obs_index, obs):
         obs = np.append(obs, self._z[obs_index])
@@ -150,6 +152,8 @@ class DIAYNWrapper(VectorEnvWrapper):
         obss = [self.augment_obs(i, obs) for i, obs in enumerate(obss)]
 
         #print(obss)
+        if self.is_evaluator:
+            return obss, extrinsic_rews, dones, infos
 
         return obss, reward_pls, dones, infos
 
@@ -158,15 +162,20 @@ class DIAYNWrapper(VectorEnvWrapper):
 
         obs = self.env.reset(mask)
 
+        mask = np.logical_not(mask)
         if self.top_extrinsic is None:
             self.top_extrinsic = np.zeros((len(obs),))
         if self.extrinsic_counter is None:
             self.extrinsic_counter = np.zeros((len(obs),))
      #   print("counter:", self.extrinsic_counter)
-        if self.extrinsic_counter is not None:
-            extrinsic_mask = (self.extrinsic_counter > self.top_extrinsic) == mask
+
+        extrinsic_gt_mask = self.extrinsic_counter >= self.top_extrinsic
+        extrinsic_mask = np.logical_and(extrinsic_gt_mask, mask)
+        if self.extrinsic_counter is not None and extrinsic_mask.any():
             self.top_extrinsic[extrinsic_mask] = self.extrinsic_counter[extrinsic_mask] # updates top scores
             self.extrinsic_counter[mask] = 0
+
+           # print(self.top_extrinsic)
     #    print("counter:", self.extrinsic_counter)
 
         self._z = np.random.randint(0, self.n_skills, (len(obs),))   # todo could actually explore more than one z at once?

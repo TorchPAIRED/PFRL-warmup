@@ -6,5 +6,6 @@ filelock
 pillow
 six
 matplotlib
-pfrl
+# pfrl install from source!!
 mujoco-py
+tensorboard

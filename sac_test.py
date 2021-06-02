@@ -168,7 +168,7 @@ def main():
     process_seeds = np.arange(args.num_envs) + args.seed * args.num_envs
     assert process_seeds.max() < 2 ** 32
 
-    def make_batch_env(test, discriminator=None, force_no_diayn=False):
+    def make_batch_env(test, discriminator=None, force_no_diayn=False, is_evaluator=False):
 
         env = pfrl.envs.MultiprocessVectorEnv(
             [
@@ -178,7 +178,7 @@ def main():
         )
 
         if args.diayn_use and force_no_diayn is not True:
-            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills)
+            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, is_evaluator=is_evaluator)
         return env
 
     discriminator = None
@@ -303,15 +303,36 @@ def main():
     else:
         eval_hooks = []
         if args.diayn_use:
-            def log_disc(env, agent, evaluator, t, eval_score):
+            def log_disc(env,
+                agent,
+                evaluator,
+                step,
+                eval_stats,
+                agent_stats,
+                env_stats):
                 env.call_logging()
+            log_disc.support_train_agent_batch = True
 
             eval_hooks.append(log_disc)
+
+        """
+        dir = args.outdir+"/train"
+        from torch.utils.tensorboard import SummaryWriter
+        class TBLoggerSpoof():
+            def __init__(self):
+                self.writer = SummaryWriter(dir)
+            def info(self, string):
+                header = string.split(" ")[0]
+                info = string.split(" ")[1]
+
+                if "result" in header:  
+        """
+
 
         experiments.train_agent_batch_with_evaluation(
             agent=agent,
             env=make_batch_env(test=False, discriminator=discriminator),
-            eval_env=make_batch_env(test=True, discriminator=discriminator),
+            eval_env=make_batch_env(test=True, discriminator=discriminator, is_evaluator=True),
             outdir=args.outdir,
             steps=args.steps,
             eval_n_steps=None,
@@ -319,7 +340,8 @@ def main():
             eval_interval=args.eval_interval,
             log_interval=args.log_interval,
             max_episode_len=timestep_limit,
-            evaluation_hooks=eval_hooks
+            evaluation_hooks=eval_hooks,
+            use_tensorboard=True
         )
 
 
