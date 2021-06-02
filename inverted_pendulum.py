@@ -46,7 +46,7 @@ def main():
         ),
     )
     parser.add_argument(
-        "--steps", type=int, default=10 ** 7, help="Total time steps for training."
+        "--steps", type=int, default=50 ** 7, help="Total time steps for training."
     )
     parser.add_argument(
         "--max-frames",

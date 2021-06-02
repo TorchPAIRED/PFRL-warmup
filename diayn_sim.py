@@ -65,18 +65,23 @@ class DIAYNWrapper(VectorEnvWrapper):
 
         # NN stuff
         self.discriminator = discriminator
-        self.daiyn_optimizer = torch.optim.Adam(discriminator.parameters())  # todo pass LR etc
+        self.daiyn_optimizer = torch.optim.Adam(discriminator.parameters(), lr=3E-4)  # todo pass LR etc
         self.daiyn_loss = nn.CrossEntropyLoss()
         self.latest_loss = None
-        self.reset()    # enforces stuff that we do in reset
 
-        self.top_extrinsic = 0
+        self.top_extrinsic = None
+        self.extrinsic_counter = None
 
         # logging
         import logging
         self.logger = logging.getLogger(__name__)
 
+
+        self.reset()    # enforces stuff that we do in reset
+
     def train(self, obss):
+        self.daiyn_optimizer.zero_grad()
+
         logits = self.discriminator(obss)
         loss = self.daiyn_loss(logits, self._z.cuda())  # fixme stuff will break because numpy arrays arent torch tensors, duh
 
@@ -84,7 +89,6 @@ class DIAYNWrapper(VectorEnvWrapper):
         self.latest_logits = logits
         #
         #
-        self.daiyn_optimizer.zero_grad()
         loss.backward()
         self.daiyn_optimizer.step()
 
@@ -96,6 +100,7 @@ class DIAYNWrapper(VectorEnvWrapper):
         self.logger.info(f"disc z: {self._z}")
         self.logger.info(f"disc loss: {self.latest_loss}")
         self.logger.info(f"top extrinsic: {self.top_extrinsic}")
+        self.logger.info(f"last intrinsic: {self.last_intrisic}")
 
     def augment_obs(self, obs_index, obs):
         obs = np.append(obs, self._z[obs_index])
@@ -110,10 +115,9 @@ class DIAYNWrapper(VectorEnvWrapper):
         #plt.show()
 
         # don't need rew, but keep it in info for logging.
-        for info, extrinsic_rew in zip(infos, extrinsic_rews):
+        for i, (info, extrinsic_rew) in enumerate(zip(infos, extrinsic_rews)):
             info["extrinsic_reward"] = extrinsic_rew
-            if extrinsic_rew > self.top_extrinsic:
-                self.top_extrinsic = extrinsic_rew
+            self.extrinsic_counter[i] += extrinsic_rew
 
         # see here for this logic https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L181
         # I think this is with no_grad() because the discriminator trains here https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L261
@@ -135,7 +139,9 @@ class DIAYNWrapper(VectorEnvWrapper):
             log_p_z = torch.log(torch.tensor(1.0/self.n_skills) + 1E-6)  # EPS is a magic number https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L21
 
             reward_pls -= log_p_z
+
         reward_pls = reward_pls.cpu().numpy()
+        self.last_intrisic = reward_pls
 
         self.train(obss)
 
@@ -148,8 +154,20 @@ class DIAYNWrapper(VectorEnvWrapper):
         return obss, reward_pls, dones, infos
 
     def reset(self, mask=None):
+       # print("mask:", mask)
 
         obs = self.env.reset(mask)
+
+        if self.top_extrinsic is None:
+            self.top_extrinsic = np.zeros((len(obs),))
+        if self.extrinsic_counter is None:
+            self.extrinsic_counter = np.zeros((len(obs),))
+     #   print("counter:", self.extrinsic_counter)
+        if self.extrinsic_counter is not None:
+            extrinsic_mask = (self.extrinsic_counter > self.top_extrinsic) == mask
+            self.top_extrinsic[extrinsic_mask] = self.extrinsic_counter[extrinsic_mask] # updates top scores
+            self.extrinsic_counter[mask] = 0
+    #    print("counter:", self.extrinsic_counter)
 
         self._z = np.random.randint(0, self.n_skills, (len(obs),))   # todo could actually explore more than one z at once?
         self._z = torch.tensor(self._z)
