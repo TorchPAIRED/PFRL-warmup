@@ -175,7 +175,8 @@ class DIAYNWrapper(VectorEnvWrapper):
             self.top_extrinsic[extrinsic_mask] = self.extrinsic_counter[extrinsic_mask] # updates top scores
             self.extrinsic_counter[mask] = 0
 
-           # print(self.top_extrinsic)
+            if self.is_evaluator:
+                print(self.top_extrinsic)
     #    print("counter:", self.extrinsic_counter)
 
         self._z = np.random.randint(0, self.n_skills, (len(obs),))   # todo could actually explore more than one z at once?
