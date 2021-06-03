@@ -17,7 +17,7 @@ from pfrl.nn.lmbda import Lambda
 from diayn_sim import DIAYNWrapper
 
 
-def make_env(args, seed, test):
+def make_env(args, seed, test, augment_with_z=False):
     env = gym.make(args.env)
     # Unwrap TimiLimit wrapper
     assert isinstance(env, gym.wrappers.TimeLimit)
@@ -30,11 +30,20 @@ def make_env(args, seed, test):
     # Normalize action space to [-1, 1]^n
     env = pfrl.wrappers.NormalizeActionSpace(env)
     if args.monitor:
+        out = args.outdir
+        if augment_with_z is not False:
+            out = out + f"/videos-for-z{augment_with_z}"
+
         env = pfrl.wrappers.Monitor(
-            env, args.outdir, force=True, video_callable=lambda _: True
+            env, out, force=True, video_callable=lambda _: True
         )
     if args.render:
         env = pfrl.wrappers.Render(env, mode="human")
+
+    if augment_with_z is not False:
+        from diayn_augmentation_wrapper import DIAYNAugmentationWrapper
+        env = DIAYNAugmentationWrapper(env, augment_with_z=augment_with_z)
+
     return env
 
 
@@ -149,6 +158,12 @@ def main():
         "--diayn-n-skills",
         type=int,
         default=50,
+        help="Number of skills to train",
+    )
+    parser.add_argument(
+        "--diayn-graph-rew-cutoff",
+        type=int,
+        default=500,
         help="Number of skills to train",
     )
 
@@ -284,51 +299,44 @@ def main():
         agent.load(args.load)
 
     if args.demo:
-        eval_env = make_env(args, seed=0, test=True)
-        eval_stats = experiments.eval_performance(
-            env=eval_env,
-            agent=agent,
-            n_steps=None,
-            n_episodes=args.eval_n_runs,
-            max_episode_len=timestep_limit,
-        )
-        print(
-            "n_runs: {} mean: {} median: {} stdev {}".format(
-                args.eval_n_runs,
-                eval_stats["mean"],
-                eval_stats["median"],
-                eval_stats["stdev"],
-            )
-        )
-    else:
-        eval_hooks = []
         if args.diayn_use:
-            def log_disc(env,
-                agent,
-                evaluator,
-                step,
-                eval_stats,
-                agent_stats,
-                env_stats):
-                env.call_logging()
-            log_disc.support_train_agent_batch = True
+            for z in range(args.diayn_n_skills):
+                eval_env = make_env(args, seed=0, test=True, augment_with_z=z)
+                eval_stats = experiments.eval_performance(
+                    env=eval_env,
+                    agent=agent,
+                    n_steps=None,
+                    n_episodes=args.eval_n_runs,
+                    max_episode_len=timestep_limit,
+                )
+                print(
+                    "z: {} n_runs: {} mean: {} median: {} stdev {}".format(
+                        z,
+                        args.eval_n_runs,
+                        eval_stats["mean"],
+                        eval_stats["median"],
+                        eval_stats["stdev"],
+                    )
+                )
+        else:
 
-            eval_hooks.append(log_disc)
-
-        """
-        dir = args.outdir+"/train"
-        from torch.utils.tensorboard import SummaryWriter
-        class TBLoggerSpoof():
-            def __init__(self):
-                self.writer = SummaryWriter(dir)
-            def info(self, string):
-                header = string.split(" ")[0]
-                info = string.split(" ")[1]
-
-                if "result" in header:  
-        """
-
-
+            eval_env = make_env(args, seed=0, test=True)
+            eval_stats = experiments.eval_performance(
+                env=eval_env,
+                agent=agent,
+                n_steps=None,
+                n_episodes=args.eval_n_runs,
+                max_episode_len=timestep_limit,
+            )
+            print(
+                "n_runs: {} mean: {} median: {} stdev {}".format(
+                    args.eval_n_runs,
+                    eval_stats["mean"],
+                    eval_stats["median"],
+                    eval_stats["stdev"],
+                )
+            )
+    else:
         experiments.train_agent_batch_with_evaluation(
             agent=agent,
             env=make_batch_env(test=False, discriminator=discriminator),
@@ -340,7 +348,6 @@ def main():
             eval_interval=args.eval_interval,
             log_interval=args.log_interval,
             max_episode_len=timestep_limit,
-            evaluation_hooks=eval_hooks,
             use_tensorboard=True
         )
 
