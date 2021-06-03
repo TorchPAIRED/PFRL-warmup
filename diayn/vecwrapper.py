@@ -53,7 +53,6 @@ class DIAYNWrapper(VectorEnvWrapper):
         # don't need rew, but keep it in info for logging.
         for i, (info, extrinsic_rew) in enumerate(zip(infos, extrinsic_rews)):
             info["extrinsic_reward"] = extrinsic_rew
-            self.extrinsic_counter[i] += extrinsic_rew
 
         # see here for this logic https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L181
         # I think this is with no_grad() because the discriminator trains here https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L261

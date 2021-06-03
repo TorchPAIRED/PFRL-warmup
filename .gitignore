@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+Roms
+result*
+*_results*
+videos
+
 # C extensions
 *.so
 
