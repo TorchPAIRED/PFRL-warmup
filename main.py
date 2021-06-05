@@ -31,19 +31,19 @@ def make_env(args, seed, test, augment_with_z=False):
     # Normalize action space to [-1, 1]^n
     env = pfrl.wrappers.NormalizeActionSpace(env)
     if args.monitor:
-        out = args.outdir
+        out_dir_for_demos = args.outdir
         if augment_with_z is not False:
-            out = out + f"/videos-for-z{augment_with_z}"
+            out_dir_for_demos = out_dir_for_demos + f"/videos-for-z{augment_with_z}"
 
         env = pfrl.wrappers.Monitor(
-            env, out, force=True, video_callable=lambda _: True
+            env, out_dir_for_demos, force=True, video_callable=lambda _: True
         )
     if args.render:
         env = pfrl.wrappers.Render(env, mode="human")
 
     if augment_with_z is not False:
         from diayn.evalwrapper import DIAYNAugmentationWrapper
-        env = DIAYNAugmentationWrapper(env, augment_with_z=augment_with_z)
+        env = DIAYNAugmentationWrapper(env, augment_with_z=augment_with_z, oh_len=1 if not args.diayn_concat_z_oh else args.diayn_n_skills, out_dir=out_dir_for_demos)
 
     return env
 
@@ -136,22 +136,9 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
     parser.add_argument("--adam-eps", type=float, default=1e-1, help="Adam eps.")
 
-
-    def str2bool(string):
-        string = string.lower()
-        trues = ["true", "1", "yes"]
-        falses = ["false", "0", "no"]
-
-        if string in trues:
-            return True
-
-        if string in falses:
-            return False
-
-        raise AssertionError
     parser.add_argument(
         "--diayn-use",
-        type=str2bool,
+        action="store_true",
         default=False,
         help="Wether or not we should use diayn",
     )
@@ -162,10 +149,10 @@ def main():
         help="Number of skills to train",
     )
     parser.add_argument(
-        "--diayn-graph-rew-cutoff",
-        type=int,
-        default=500,
-        help="Number of skills to train",
+        "--diayn-concat-z-oh",
+        action="store_true",
+        default=False,
+        help="If true, will use a one-hot of z to augment the observation instead of just z's value.",
     )
 
     args = parser.parse_args()
@@ -194,7 +181,7 @@ def main():
         )
 
         if args.diayn_use and force_no_diayn is not True:
-            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, is_evaluator=is_evaluator)
+            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, is_evaluator=is_evaluator, oh_concat=args.diayn_concat_z_oh)
         return env
 
     discriminator = None

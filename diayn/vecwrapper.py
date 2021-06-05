@@ -15,14 +15,15 @@ from diayn.common import resize_obs_space, augment_obs
 
 
 class DIAYNWrapper(VectorEnvWrapper):
-    def __init__(self, env, discriminator, n_skills, is_evaluator=False):
+    def __init__(self, env, discriminator, n_skills, is_evaluator=False, oh_concat=False):
         # The next lines spoof the original env
         super().__init__(env)
         self.env = env
         self.is_evaluator = is_evaluator
 
         # need to augment by z, so this is one bigger than the original space
-        self.observation_space = resize_obs_space(env.observation_space)
+        self.oh_len = 1 if oh_concat is False else n_skills
+        self.observation_space = resize_obs_space(env.observation_space, self.oh_len)
         self.n_skills = n_skills
 
         # NN stuff
@@ -33,7 +34,7 @@ class DIAYNWrapper(VectorEnvWrapper):
         # logging
         import logging
         self.logger = logging.getLogger(__name__)   # todo unused for the moment, might make this into a tensorboard thingy
-
+        self._z = None
         self.reset()
 
     def train(self, obss):
@@ -69,7 +70,7 @@ class DIAYNWrapper(VectorEnvWrapper):
 
         self.train(obss)
 
-        obss = [augment_obs(obs, self._z[i]) for i, obs in enumerate(obss)]
+        obss = [augment_obs(obs, self._z[i], self.oh_len) for i, obs in enumerate(obss)]
 
         if self.is_evaluator:   # when is an evaluator, just return the extrinsic rewards, no need for intrisic
             return obss, extrinsic_rews, dones, infos
@@ -79,8 +80,14 @@ class DIAYNWrapper(VectorEnvWrapper):
     def reset(self, mask=None):
         obs = self.env.reset(mask)
 
-        self._z = torch.randint(0, self.n_skills, (len(obs),))
+        must_reset = np.logical_not(mask)
 
-        obs = [augment_obs(ob, self._z[i]) for i, ob in enumerate(obs)]
+        z = torch.randint(0, self.n_skills, (len(obs),))
+        if self._z is None or mask is None:
+            self._z = z
+        elif True in must_reset:
+            self._z[must_reset] = z[must_reset]
+
+        obs = [augment_obs(ob, self._z[i], self.oh_len) for i, ob in enumerate(obs)]
 
         return obs
