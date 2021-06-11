@@ -13,9 +13,8 @@ from pfrl.wrappers.vector_frame_stack import VectorEnvWrapper
 
 from diayn.common import resize_obs_space, augment_obs
 
-
 class DIAYNWrapper(VectorEnvWrapper):
-    def __init__(self, env, discriminator, n_skills, is_evaluator=False, oh_concat=False):
+    def __init__(self, env, discriminator, n_skills, alpha, is_evaluator=False, oh_concat=False):
         # The next lines spoof the original env
         super().__init__(env)
         self.env = env
@@ -30,14 +29,22 @@ class DIAYNWrapper(VectorEnvWrapper):
         self.discriminator = discriminator
         self.daiyn_optimizer = torch.optim.Adam(discriminator.parameters(), lr=3E-4)  # todo pass LR etc
         self.daiyn_loss = nn.CrossEntropyLoss()
+        self.alpha = alpha
 
         # logging
         import logging
         self.logger = logging.getLogger(__name__)   # todo unused for the moment, might make this into a tensorboard thingy
         self._z = None
         self.reset()
-
+        """
+        self.buffers = []
+        for _ in range(self.n_skills):
+            import collections
+            self.buffers.append(collections.deque(maxlen=1000))
+"""
     def train(self, obss):
+       # obs
+
         # note: seems to do one training step for each env step https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L446
         # ==> link training to env.step
         self.daiyn_optimizer.zero_grad()
@@ -65,17 +72,21 @@ class DIAYNWrapper(VectorEnvWrapper):
 
             log_p_z = torch.log(torch.tensor(1.0/self.n_skills) + 1E-6)  # EPS is a magic number https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L21
             reward_pls -= log_p_z
+            reward_pls *= self.alpha
 
         reward_pls = reward_pls.cpu().numpy()
 
-        self.train(obss)
+        augmented_obss = [augment_obs(obs, self._z[i], self.oh_len) for i, obs in enumerate(obss)]
 
-        obss = [augment_obs(obs, self._z[i], self.oh_len) for i, obs in enumerate(obss)]
+        if self.is_evaluator:   # when is an evaluator, just return the extrinsic rewards, no need for intrisic. Also, dont train
+            return augmented_obss, extrinsic_rews, dones, infos
 
-        if self.is_evaluator:   # when is an evaluator, just return the extrinsic rewards, no need for intrisic
-            return obss, extrinsic_rews, dones, infos
+        for obs, z in zip(obss, self._z):
+            self.buffers[z].append(obs)
 
-        return obss, reward_pls, dones, infos
+        self.train(obss)# if False else self.buffers)
+
+        return augmented_obss, reward_pls, dones, infos
 
     def reset(self, mask=None):
         obs = self.env.reset(mask)

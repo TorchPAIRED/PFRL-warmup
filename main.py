@@ -16,6 +16,7 @@ from diayn.vecwrapper import DIAYNWrapper
 from pfrl import experiments, replay_buffers, utils
 from pfrl.nn.lmbda import Lambda
 
+from utils import make_n_hidden_layers
 
 
 def make_env(args, seed, test, augment_with_z=False):
@@ -63,7 +64,7 @@ def main():
     parser.add_argument(
         "--env",
         type=str,
-        default="InvertedPendulum-v2",
+        default="HalfCheetah-v3",
         help="OpenAI Gym env to perform algorithm on.",
     )
     parser.add_argument(
@@ -128,7 +129,14 @@ def main():
     parser.add_argument(
         "--n-hidden-channels",
         type=int,
-        default=200,    # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
+        default=300,    # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
+        help="Number of hidden channels of NN models.",
+    )
+    parser.add_argument(
+        "--n-hidden-layers",
+        type=int,
+        default=1,
+        # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
         help="Number of hidden channels of NN models.",
     )
     parser.add_argument("--discount", type=float, default=0.98, help="Discount factor.")
@@ -154,6 +162,15 @@ def main():
         default=False,
         help="If true, will use a one-hot of z to augment the observation instead of just z's value.",
     )
+    parser.add_argument(
+        "--diayn-alpha",
+        type=float,
+        default=10.0,
+        help="How much to scale the intrinsic reward by",
+        # note: normally, this is done to the max entropy objective. In our version, we use PFRL, so there's a bit of
+        # infrastructure obfuscating the objective. Instead, we scale the other term (the expectation, aka the intrisic
+        # reward). The alpha=0.1 suggested in the DIAYN paper thus becomes 10.0, i.e. 1/0.1.
+    )
 
     args = parser.parse_args()
 
@@ -161,6 +178,9 @@ def main():
 
     args.outdir = experiments.prepare_output_dir(args, args.outdir, argv=sys.argv)
     print("Output files are saved in {}".format(args.outdir))
+
+    with open(args.outdir + "/args.txt", "w") as f:
+        f.write("\n".join(str(args).split(",")))
 
     # Set a random seed used in PFRL
     utils.set_random_seed(args.seed)
@@ -181,7 +201,7 @@ def main():
         )
 
         if args.diayn_use and force_no_diayn is not True:
-            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, is_evaluator=is_evaluator, oh_concat=args.diayn_concat_z_oh)
+            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, args.diayn_alpha, is_evaluator=is_evaluator, oh_concat=args.diayn_concat_z_oh)
         return env
 
     discriminator = None
@@ -194,7 +214,8 @@ def main():
 
         discriminator = Discriminator(
             input_size=obs_space,
-            layers=(200, 200),
+            hidden_channels=args.n_hidden_channels,
+            hidden_layers=args.n_hidden_layers,
             n_skills=args.diayn_n_skills
         ).cuda()
 
@@ -221,11 +242,12 @@ def main():
             base_distribution, [distributions.transforms.TanhTransform(cache_size=1)]
         )
 
+
+
     policy = nn.Sequential(
         nn.Linear(obs_space.low.size, args.n_hidden_channels),
         nn.ReLU(),
-        nn.Linear(args.n_hidden_channels, args.n_hidden_channels),
-        nn.ReLU(),
+        *make_n_hidden_layers(args.n_hidden_layers, args.n_hidden_channels),
         nn.Linear(args.n_hidden_channels, action_size * 2),
         Lambda(squashed_diagonal_gaussian_head),
     )
@@ -241,8 +263,7 @@ def main():
             pfrl.nn.ConcatObsAndAction(),
             nn.Linear(obs_space.low.size + action_size, args.n_hidden_channels),
             nn.ReLU(),
-            nn.Linear(args.n_hidden_channels, args.n_hidden_channels),
-            nn.ReLU(),
+            *make_n_hidden_layers(args.n_hidden_layers, args.n_hidden_channels),
             nn.Linear(args.n_hidden_channels, 1),
         )
         torch.nn.init.xavier_uniform_(q_func[1].weight)

@@ -11,25 +11,24 @@ import numpy as np
 # seems to be tanh? https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/misc/mlp.py#L88
 from pfrl.wrappers.vector_frame_stack import VectorEnvWrapper
 
+from utils import make_n_hidden_layers
+
+
 class Discriminator(nn.Module):
-    def __init__(self, input_size, layers, n_skills, hidden_nonlinearity=nn.LeakyReLU, output_nonlinearity=nn.Tanh):
+    def __init__(self, input_size, hidden_channels, hidden_layers, n_skills, hidden_nonlinearity=nn.LeakyReLU, output_nonlinearity=nn.Tanh):
         super().__init__()
 
-        input_size = np.array(list(input_size)).flatten()
-
-        layers = list(input_size) + list(layers)
-        layers = list(zip(layers[0:], layers[1:]))
-        torch_layers = []
-        for first, second in layers:
-            torch_layers.append(nn.Linear(first, second))
-            torch_layers.append(hidden_nonlinearity())
+        input_size = np.array(list(input_size)).flatten()[0]
 
         self.seq = nn.Sequential(
-            *torch_layers
+            nn.Linear(input_size, hidden_channels),
+            nn.ReLU(),
+            *make_n_hidden_layers(hidden_layers, hidden_channels)
         )
 
-        self.out_layer = nn.Linear(layers[-1][-1], n_skills)
+        self.out_layer = nn.Linear(hidden_channels, n_skills)
         self.out_nonlinearity = output_nonlinearity()
+        print(self)
 
     def forward(self, input):
         with torch.no_grad():   # preprocess doesn't have grads
