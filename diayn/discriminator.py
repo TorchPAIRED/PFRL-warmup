@@ -14,7 +14,7 @@ from pfrl.wrappers.vector_frame_stack import VectorEnvWrapper
 from utils import make_n_hidden_layers
 
 
-class Discriminator(nn.Module):
+class CrossEntropyDiscriminator(nn.Module):
     def __init__(self, input_size, hidden_channels, hidden_layers, n_skills, hidden_nonlinearity=nn.LeakyReLU, output_nonlinearity=nn.Tanh):
         super().__init__()
 
@@ -22,7 +22,7 @@ class Discriminator(nn.Module):
 
         self.seq = nn.Sequential(
             nn.Linear(input_size, hidden_channels),
-            nn.ReLU(),
+            hidden_nonlinearity(),
             *make_n_hidden_layers(hidden_layers, hidden_channels)
         )
 
@@ -38,3 +38,29 @@ class Discriminator(nn.Module):
         linear_output = self.out_layer(hidden_output)
         logits = self.out_nonlinearity(linear_output)
         return logits
+
+class BinaryEntropyDiscriminator(nn.Module):
+    def __init__(self, input_size, hidden_channels, hidden_layers, n_skills, hidden_nonlinearity=nn.Tanh, output_nonlinearity=nn.Sigmoid):
+        super().__init__()
+
+        input_size = np.array(list(input_size)).flatten()[0]
+
+        self.seq = nn.Sequential(
+            nn.Linear(input_size, hidden_channels),
+            hidden_nonlinearity(),
+            *make_n_hidden_layers(hidden_layers, hidden_channels, hidden_nonlinearity)
+        )
+
+        self.out_layer = nn.Linear(hidden_channels, n_skills)
+        self.out_nonlinearity = output_nonlinearity()
+        print(self)
+
+    def forward(self, input):
+        with torch.no_grad():   # preprocess doesn't have grads
+            input = torch.tensor(input).cuda()
+
+        hidden_output = self.seq(input)
+        linear_output = self.out_layer(hidden_output)
+        logits = self.out_nonlinearity(linear_output)
+        return logits
+

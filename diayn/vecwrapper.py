@@ -1,3 +1,5 @@
+import random
+
 import gym
 import torch
 import torch.nn as nn
@@ -36,21 +38,43 @@ class DIAYNWrapper(VectorEnvWrapper):
         self.logger = logging.getLogger(__name__)   # todo unused for the moment, might make this into a tensorboard thingy
         self._z = None
         self.reset()
-        """
+
         self.buffers = []
         for _ in range(self.n_skills):
             import collections
-            self.buffers.append(collections.deque(maxlen=1000))
-"""
+            self.buffers.append(collections.deque(maxlen=800))
+
     def train(self, obss):
-       # obs
+        """
+        extender = []
+        zs = []
+        for i,z in enumerate(self._z):
+            extender.append(obss[i])
+            zs.append(z)
+
+        for z in range(self.n_skills):
+            buffer = self.buffers[z]
+            maxlen = len(buffer)
+            if maxlen <= 4:
+                continue
+            already_picked = random.sample(range(0, maxlen), 4)
+            for id in already_picked:
+                if zs.count(z) >= 4:
+                    break
+
+                extender.append(buffer[id])
+                zs.append(z)
+                """
+       # obss = extender
+        #zs = torch.tensor(zs).long().cuda()
+        zs = self._z.cuda()
 
         # note: seems to do one training step for each env step https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L446
         # ==> link training to env.step
         self.daiyn_optimizer.zero_grad()
 
         logits = self.discriminator(obss)
-        loss = self.daiyn_loss(logits, self._z.cuda())
+        loss = self.daiyn_loss(logits, zs)
 
         loss.backward()
         self.daiyn_optimizer.step()
@@ -72,7 +96,7 @@ class DIAYNWrapper(VectorEnvWrapper):
 
             log_p_z = torch.log(torch.tensor(1.0/self.n_skills) + 1E-6)  # EPS is a magic number https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L21
             reward_pls -= log_p_z
-            reward_pls *= self.alpha
+            #reward_pls *= 5
 
         reward_pls = reward_pls.cpu().numpy()
 
@@ -84,7 +108,7 @@ class DIAYNWrapper(VectorEnvWrapper):
         for obs, z in zip(obss, self._z):
             self.buffers[z].append(obs)
 
-        self.train(obss)# if False else self.buffers)
+        self.train(obss)
 
         return augmented_obss, reward_pls, dones, infos
 

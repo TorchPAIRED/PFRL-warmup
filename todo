@@ -1,0 +1,2 @@
+PYTHONUNBUFFERED=1;LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/home/charlie/.mujoco/mujoco200/bin::/usr/lib/nvidia-460 python3 main.py --diayn-use --demo --load results/a868935441084b03e2bb37985842394a3b8b9b08-d616826e-51001c4d/best --monitor --diayn-concat-z-oh
+Output files are saved in results/a868935441084b03e2bb37985842394a3b8b9b08-d616826e-a5c51172

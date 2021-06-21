@@ -11,7 +11,7 @@ import torch
 from torch import distributions, nn
 
 import pfrl
-from diayn.discriminator import Discriminator
+from diayn.discriminator import CrossEntropyDiscriminator
 from diayn.vecwrapper import DIAYNWrapper
 from pfrl import experiments, replay_buffers, utils
 from pfrl.nn.lmbda import Lambda
@@ -129,13 +129,13 @@ def main():
     parser.add_argument(
         "--n-hidden-channels",
         type=int,
-        default=300,    # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
+        default=400,    # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
         help="Number of hidden channels of NN models.",
     )
     parser.add_argument(
         "--n-hidden-layers",
         type=int,
-        default=1,
+        default=2,
         # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
         help="Number of hidden channels of NN models.",
     )
@@ -212,7 +212,7 @@ def main():
         print("Old action space", sample_env.action_space)
         del sample_env
 
-        discriminator = Discriminator(
+        discriminator = CrossEntropyDiscriminator(
             input_size=obs_space,
             hidden_channels=args.n_hidden_channels,
             hidden_layers=args.n_hidden_layers,
