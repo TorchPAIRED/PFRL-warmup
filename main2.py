@@ -163,10 +163,10 @@ def main():
         help="If true, will use a one-hot of z to augment the observation instead of just z's value.",
     )
     parser.add_argument(
-        "--note",
+        "--diayn-alpha",
         type=float,
         default=10.0,
-        help="Normal",
+        help="How much to scale the intrinsic reward by",
         # note: normally, this is done to the max entropy objective. In our version, we use PFRL, so there's a bit of
         # infrastructure obfuscating the objective. Instead, we scale the other term (the expectation, aka the intrisic
         # reward). The alpha=0.1 suggested in the DIAYN paper thus becomes 10.0, i.e. 1/0.1.
@@ -201,7 +201,7 @@ def main():
         )
 
         if args.diayn_use and force_no_diayn is not True:
-            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, 0, is_evaluator=is_evaluator, oh_concat=args.diayn_concat_z_oh)
+            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, args.diayn_alpha, is_evaluator=is_evaluator, oh_concat=args.diayn_concat_z_oh)
         return env
 
     discriminator = None

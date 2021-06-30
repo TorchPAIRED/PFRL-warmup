@@ -23,7 +23,7 @@ class CrossEntropyDiscriminator(nn.Module):
         self.seq = nn.Sequential(
             nn.Linear(input_size, hidden_channels),
             hidden_nonlinearity(),
-            *make_n_hidden_layers(hidden_layers, hidden_channels)
+            *make_n_hidden_layers(hidden_layers, hidden_channels, nn.ReLU)
         )
 
         self.out_layer = nn.Linear(hidden_channels, n_skills)
