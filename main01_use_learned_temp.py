@@ -164,7 +164,7 @@ def main():
     parser.add_argument(
         "--diayn-alpha",
         type=float,
-        default=False,
+        default=0.1,
         help="How much to scale the entropy regularizer by. If false, uses a learned temperature. Otherwise, uses a static temperature (equivalent to DIAYN's original alpha)",
         # todo make sure this is right
     )
@@ -176,6 +176,13 @@ def main():
         # note: normally, this is done to the max entropy objective. In our version, we use PFRL, so there's a bit of
         # infrastructure obfuscating the objective. Instead, we scale the other term (the expectation, aka the intrisic
         # reward). The alpha=0.1 suggested in the DIAYN paper thus becomes 10.0, i.e. 1/0.1.
+    )
+    parser.add_argument(
+        "--note-field",
+        type=str,
+        default="this is using a initial temp but a non-None entropy target. So not a static temp.",
+        help="How much to scale the entropy regularizer by. If false, uses a learned temperature. Otherwise, uses a static temperature (equivalent to DIAYN's original alpha)",
+        # todo make sure this is right
     )
 
     args = parser.parse_args()
@@ -317,7 +324,7 @@ def main():
         gpu=args.gpu,
         minibatch_size=args.batch_size,
         burnin_action_func=burnin_action_func,
-        entropy_target=-action_size if args.diayn_alpha is not False else None,
+        entropy_target=-action_size,
         initial_temperature=1.0 if args.diayn_alpha is False else args.diayn_alpha,
         temperature_optimizer_lr=args.lr,
     )
