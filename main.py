@@ -1,39 +1,59 @@
-
-"""An example of training PPO against OpenAI Gym Atari Envs.
-This script is an example of training a PPO agent on Atari envs.
-To train PPO for 10M timesteps on Breakout, run:
-    python train_ppo_ale.py
-To train PPO using a recurrent model on a flickering Atari env, run:
-    python train_ppo_ale.py --recurrent --flicker --no-frame-stack
-"""
+"""A training script of Soft Actor-Critic on ."""
 import argparse
+import functools
+import logging
+import sys
 
+import gym
+import gym.wrappers
 import numpy as np
 import torch
-from torch import nn
+from torch import distributions, nn
 
 import pfrl
-from pfrl import experiments, utils
-from pfrl.agents import PPO
-from pfrl.policies import SoftmaxCategoricalHead
-from pfrl.wrappers import atari_wrappers
+import wrappers
+from diayn.discriminator import CrossEntropyDiscriminator, BinaryEntropyDiscriminator
+from diayn.vecwrapper import DIAYNWrapper, DIAYNVecEval
+from pfrl import experiments, replay_buffers, utils
+from pfrl.nn.lmbda import Lambda
+
+from utils import make_n_hidden_layers
+
+
+def make_env(args, seed, test, augment_with_z=False):
+    env = gym.make(args.env)
+    # Unwrap TimiLimit wrapper
+    assert isinstance(env, gym.wrappers.TimeLimit)
+    env = env.env
+    # Use different random seeds for train and test envs
+    env_seed = 2 ** 32 - 1 - seed if test else seed
+    env.seed(int(env_seed))
+    # Cast observations to float32 because our model uses float32
+    env = pfrl.wrappers.CastObservationToFloat32(env)
+    # Normalize action space to [-1, 1]^n
+    env = wrappers.DiscreteToBoxActionSpace(env)
+    env = pfrl.wrappers.NormalizeActionSpace(env)
+    if args.monitor:
+        out_dir_for_demos = args.outdir
+        if augment_with_z is not False:
+            out_dir_for_demos = out_dir_for_demos + f"/videos-for-z{augment_with_z}"
+
+        env = pfrl.wrappers.Monitor(
+            env, out_dir_for_demos, force=True, video_callable=lambda _: True
+        )
+    if args.render:
+        env = pfrl.wrappers.Render(env, mode="human")
+
+    if augment_with_z is not False:
+        from diayn.evalwrapper import DIAYNAugmentationWrapper
+        env = DIAYNAugmentationWrapper(env, augment_with_z=augment_with_z, oh_len=1 if not args.diayn_concat_z_oh else args.diayn_n_skills, out_dir=out_dir_for_demos)
+
+    return env
 
 
 def main():
+
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--env", type=str, default="BreakoutNoFrameskip-v4", help="Gym Env ID."
-    )
-    parser.add_argument(
-        "--gpu", type=int, default=0, help="GPU device ID. Set to -1 to use CPUs only."
-    )
-    parser.add_argument(
-        "--num-envs",
-        type=int,
-        default=6,
-        help="Number of env instances run in parallel.",
-    )
-    parser.add_argument("--seed", type=int, default=0, help="Random seed [0, 2 ** 32)")
     parser.add_argument(
         "--outdir",
         type=str,
@@ -44,336 +64,335 @@ def main():
         ),
     )
     parser.add_argument(
-        "--steps", type=int, default=10 ** 7, help="Total time steps for training."
+        "--env",
+        type=str,
+        default="MountainCarContinuous-v0",
+        help="OpenAI Gym env to perform algorithm on.",
     )
     parser.add_argument(
-        "--max-frames",
-        type=int,
-        default=30 * 60 * 60,  # 30 minutes with 60 fps
-        help="Maximum number of frames for each episode.",
+        "--num-envs", type=int, default=4, help="Number of envs run in parallel."
     )
-    parser.add_argument("--lr", type=float, default=2.5e-4, help="Learning rate.")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed [0, 2 ** 32)")
     parser.add_argument(
-        "--eval-interval",
+        "--gpu", type=int, default=0, help="GPU to use, set to -1 if no GPU."
+    )
+    parser.add_argument(
+        "--load", type=str, default="", help="Directory to load agent from."
+    )
+    parser.add_argument(
+        "--steps",
         type=int,
-        default=100000,
-        help="Interval (in timesteps) between evaluation phases.",
+        default=10 ** 7,
+        help="Total number of timesteps to train the agent.",
     )
     parser.add_argument(
         "--eval-n-runs",
         type=int,
-        default=10,
-        help="Number of episodes ran in an evaluation phase.",
-    )
-    parser.add_argument(
-        "--demo",
-        action="store_true",
-        default=False,
-        help="Run demo episodes, not training.",
-    )
-    parser.add_argument(
-        "--load",
-        type=str,
-        default="",
-        help=(
-            "Directory path to load a saved agent data from"
-            " if it is a non-empty string."
-        ),
-    )
-    parser.add_argument(
-        "--log-level",
-        type=int,
         default=20,
-        help="Logging level. 10:DEBUG, 20:INFO etc.",
+        help="Number of episodes run for each evaluation.",
     )
     parser.add_argument(
-        "--render",
-        action="store_true",
-        default=False,
-        help="Render env states in a GUI window.",
+        "--eval-interval",
+        type=int,
+        default=25000,
+        help="Interval in timesteps between evaluations.",
     )
     parser.add_argument(
-        "--monitor",
-        action="store_true",
-        default=False,
-        help=(
-            "Monitor env. Videos and additional information are saved as output files."
-        ),
+        "--replay-start-size",
+        type=int,
+        default=10000,
+        help="Minimum replay buffer size before " + "performing gradient updates.",
     )
     parser.add_argument(
         "--update-interval",
         type=int,
-        default=128 * 8,
-        help="Interval (in timesteps) between PPO iterations.",
+        default=1,
+        help="Interval in timesteps between model updates.",
+    )
+    parser.add_argument("--batch-size", type=int, default=256, help="Minibatch size")
+    parser.add_argument(
+        "--render", action="store_true", help="Render env states in a GUI window."
     )
     parser.add_argument(
-        "--batchsize",
-        type=int,
-        default=32 * 8,
-        help="Size of minibatch (in timesteps).",
+        "--demo", action="store_true", help="Just run evaluation, not training."
     )
     parser.add_argument(
-        "--epochs",
-        type=int,
-        default=4,
-        help="Number of epochs used for each PPO iteration.",
+        "--monitor", action="store_true", help="Wrap env with Monitor to write videos."
     )
     parser.add_argument(
         "--log-interval",
         type=int,
-        default=10000,
-        help="Interval (in timesteps) of printing logs.",
+        default=1000,
+        help="Interval in timesteps between outputting log messages during training",
     )
     parser.add_argument(
-        "--recurrent",
-        action="store_true",
-        default=False,
-        help="Use a recurrent model. See the code for the model definition.",
+        "--log-level", type=int, default=logging.INFO, help="Level of the root logger."
     )
     parser.add_argument(
-        "--flicker",
-        action="store_true",
-        default=False,
-        help=(
-            "Use so-called flickering Atari, where each"
-            " screen is blacked out with probability 0.5."
-        ),
-    )
-    parser.add_argument(
-        "--no-frame-stack",
-        action="store_true",
-        default=False,
-        help=(
-            "Disable frame stacking so that the agent can only see the current screen."
-        ),
-    )
-    parser.add_argument(
-        "--checkpoint-frequency",
+        "--n-hidden-channels",
         type=int,
-        default=None,
-        help="Frequency at which agents are stored.",
+        default=400,    # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
+        help="Number of hidden channels of NN models.",
     )
+    parser.add_argument(
+        "--n-hidden-layers",
+        type=int,
+        default=2,
+        # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
+        help="Number of hidden channels of NN models.",
+    )
+    parser.add_argument("--discount", type=float, default=0.98, help="Discount factor.")
+    parser.add_argument("--n-step-return", type=int, default=3, help="N-step return.")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
+    parser.add_argument("--adam-eps", type=float, default=1e-1, help="Adam eps.")
 
     parser.add_argument(
         "--diayn-use",
-        type=bool,
+        action="store_true",
         default=False,
         help="Wether or not we should use diayn",
     )
     parser.add_argument(
         "--diayn-n-skills",
         type=int,
-        default=6,
+        default=50,
         help="Number of skills to train",
+    )
+    parser.add_argument(
+        "--diayn-concat-z-oh",
+        action="store_true",
+        default=False,
+        help="If true, will use a one-hot of z to augment the observation instead of just z's value.",
+    )
+    parser.add_argument(
+        "--diayn-use-bce",
+        action="store_true",
+        default=False,
+        help="If true, will use BinaryCrossEntropy instead of CrossEntropy.",
+    )
+    parser.add_argument(
+        "--note",
+        type=float,
+        default=10.0,
+        help="Normal",
+        # note: normally, this is done to the max entropy objective. In our version, we use PFRL, so there's a bit of
+        # infrastructure obfuscating the objective. Instead, we scale the other term (the expectation, aka the intrisic
+        # reward). The alpha=0.1 suggested in the DIAYN paper thus becomes 10.0, i.e. 1/0.1.
     )
 
     args = parser.parse_args()
 
-    import logging
-
     logging.basicConfig(level=args.log_level)
 
-    # Set a random seed used in PFRL.
+    args.outdir = experiments.prepare_output_dir(args, args.outdir, argv=sys.argv)
+    print("Output files are saved in {}".format(args.outdir))
+
+    with open(args.outdir + "/args.txt", "w") as f:
+        f.write("\n".join(str(args).split(",")))
+
+    # Set a random seed used in PFRL
     utils.set_random_seed(args.seed)
 
     # Set different random seeds for different subprocesses.
     # If seed=0 and processes=4, subprocess seeds are [0, 1, 2, 3].
     # If seed=1 and processes=4, subprocess seeds are [4, 5, 6, 7].
-    process_seeds = np.arange(args.num_envs) + args.seed * args.num_envs
+    process_seeds = np.arange(args.diayn_n_skills) + args.seed * args.num_envs
     assert process_seeds.max() < 2 ** 32
 
-    args.outdir = experiments.prepare_output_dir(args, args.outdir)
-    print("Output files are saved in {}".format(args.outdir))
+    def make_batch_env(test, discriminator=None, force_no_diayn=False, is_evaluator=False):
 
-    def make_env(idx, test, discriminator):
-        # Use different random seeds for train and test envs
-        process_seed = int(process_seeds[idx])
-        env_seed = 2 ** 32 - 1 - process_seed if test else process_seed
-        env = atari_wrappers.wrap_deepmind(
-            atari_wrappers.make_atari(args.env, max_frames=args.max_frames),
-            episode_life=not test,
-            clip_rewards=not test,
-            flicker=args.flicker,
-            frame_stack=False,
-        )
-        env.seed(env_seed)
+        num_envs = args.num_envs
+        if is_evaluator:
+            num_envs = args.diayn_n_skills
 
-        if args.diayn_use:
-            from diayn_sim import DIAYNWrapper
-            def augment_obs(obs, z):
-                obs[:, 1:4, :] = z
-                return obs
-            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, augment_obs_func=augment_obs)
-
-        if args.monitor:
-            env = pfrl.wrappers.Monitor(
-                env, args.outdir, mode="evaluation" if test else "training"
-            )
-        if args.render:
-            env = pfrl.wrappers.Render(env)
-        return env
-
-    def make_batch_env(test, discriminator):
-        vec_env = pfrl.envs.MultiprocessVectorEnv(
+        env = pfrl.envs.MultiprocessVectorEnv(
             [
-                (lambda: make_env(idx, test, discriminator))
-                for idx, env in enumerate(range(args.num_envs))
+                functools.partial(make_env, args, process_seeds[idx], test)
+                for idx, env in enumerate(range(num_envs))
             ]
         )
-        if not args.no_frame_stack:
-            vec_env = pfrl.wrappers.VectorFrameStack(vec_env, 4)
-        return vec_env
+
+        if args.diayn_use and force_no_diayn is not True:
+            if is_evaluator:
+                env = DIAYNVecEval(env, discriminator, args.diayn_n_skills, oh_concat=args.diayn_concat_z_oh)
+            else:
+                env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, oh_concat=args.diayn_concat_z_oh)
+        return env
 
     discriminator = None
     if args.diayn_use:
-        from diayn_sim import Discriminator
+        sample_env = make_batch_env(test=False, discriminator=None, force_no_diayn=True)
+        obs_space = sample_env.observation_space.shape
+        print("Old observation space", sample_env.observation_space)
+        print("Old action space", sample_env.action_space)
+        del sample_env
 
-        def preprocess(input):
-            # don't care about framestack since here we only care about the STATES, not trajectory
-            # also, we want a batch of vectors, not matrices
+        disc_func = CrossEntropyDiscriminator if args.diayn_use_bce is False else BinaryEntropyDiscriminator
 
-            input = torch.tensor(input)
-
-            input_shape_len = len(list(input.shape))
-
-            assert input_shape_len == 3, f"input shape for discrimnator must be 3; it is {input_shape_len}"
-
-            flattened = torch.flatten(input, start_dim=1).to(torch.float32)
-
-            flattened -= flattened.min(1, keepdim=True)[0]
-            flattened /= flattened.max(1, keepdim=True)[0]
-
-            return flattened
-
-        discriminator = Discriminator(
-            input_size=7056,
-            layers=(300,300),
-            n_skills=args.diayn_n_skills,
-            preprocess=preprocess
+        discriminator = disc_func(
+            input_size=obs_space,
+            hidden_channels=args.n_hidden_channels,
+            hidden_layers=args.n_hidden_layers,
+            n_skills=args.diayn_n_skills
         ).cuda()
 
-    sample_env = make_batch_env(test=False, discriminator=discriminator)
-    print("Observation space", sample_env.observation_space)
-    print("Action space", sample_env.action_space)
-    n_actions = sample_env.action_space.n
-    obs_n_channels = sample_env.observation_space.low.shape[0]
+    sample_env = make_batch_env(args, discriminator=discriminator)
+    timestep_limit = sample_env.spec.max_episode_steps
+    obs_space = sample_env.observation_space
+    action_space = sample_env.action_space
+    print("Observation space:", obs_space)
+    print("Action space:", action_space)
     del sample_env
 
-    def lecun_init(layer, gain=1):
-        if isinstance(layer, (nn.Conv2d, nn.Linear)):
-            pfrl.initializers.init_lecun_normal(layer.weight, gain)
-            nn.init.zeros_(layer.bias)
-        else:
-            pfrl.initializers.init_lecun_normal(layer.weight_ih_l0, gain)
-            pfrl.initializers.init_lecun_normal(layer.weight_hh_l0, gain)
-            nn.init.zeros_(layer.bias_ih_l0)
-            nn.init.zeros_(layer.bias_hh_l0)
-        return layer
+    action_size = action_space.low.size
 
-    if args.recurrent:
-        model = pfrl.nn.RecurrentSequential(
-            lecun_init(nn.Conv2d(obs_n_channels, 32, 8, stride=4)),
-            nn.ReLU(),
-            lecun_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            lecun_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            lecun_init(nn.Linear(3136, 512)),
-            nn.ReLU(),
-            lecun_init(nn.GRU(num_layers=1, input_size=512, hidden_size=512)),
-            pfrl.nn.Branched(
-                nn.Sequential(
-                    lecun_init(nn.Linear(512, n_actions), 1e-2),
-                    SoftmaxCategoricalHead(),
-                ),
-                lecun_init(nn.Linear(512, 1)),
-            ),
+    def squashed_diagonal_gaussian_head(x):
+        assert x.shape[-1] == action_size * 2
+        mean, log_scale = torch.chunk(x, 2, dim=1)
+        log_scale = torch.clamp(log_scale, -20.0, 2.0)
+        var = torch.exp(log_scale * 2)
+        base_distribution = distributions.Independent(
+            distributions.Normal(loc=mean, scale=torch.sqrt(var)), 1
         )
-    else:
-        model = nn.Sequential(
-            lecun_init(nn.Conv2d(obs_n_channels, 32, 8, stride=4)),
-            nn.ReLU(),
-            lecun_init(nn.Conv2d(32, 64, 4, stride=2)),
-            nn.ReLU(),
-            lecun_init(nn.Conv2d(64, 64, 3, stride=1)),
-            nn.ReLU(),
-            nn.Flatten(),
-            lecun_init(nn.Linear(3136, 512)),
-            nn.ReLU(),
-            pfrl.nn.Branched(
-                nn.Sequential(
-                    lecun_init(nn.Linear(512, n_actions), 1e-2),
-                    SoftmaxCategoricalHead(),
-                ),
-                lecun_init(nn.Linear(512, 1)),
-            ),
+        # cache_size=1 is required for numerical stability
+        return distributions.transformed_distribution.TransformedDistribution(
+            base_distribution, [distributions.transforms.TanhTransform(cache_size=1)]
         )
 
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-5)
 
-    def phi(x):
-        # Feature extractor
-        return np.asarray(x, dtype=np.float32) / 255
 
-    agent = PPO(
-        model,
-        opt,
-        gpu=args.gpu,
-        phi=phi,
-        update_interval=args.update_interval,
-        minibatch_size=args.batchsize,
-        epochs=args.epochs,
-        clip_eps=0.1,
-        clip_eps_vf=None,
-        standardize_advantages=True,
-        entropy_coef=1e-2,
-        recurrent=args.recurrent,
-        max_grad_norm=0.5,
+    policy = nn.Sequential(
+        nn.Linear(obs_space.low.size, args.n_hidden_channels),
+        nn.ReLU(),
+        *make_n_hidden_layers(args.n_hidden_layers, args.n_hidden_channels, nn.ReLU),
+        nn.Linear(args.n_hidden_channels, action_size * 2),
+        Lambda(squashed_diagonal_gaussian_head),
     )
-    if args.load:
+    torch.nn.init.xavier_uniform_(policy[0].weight)
+    torch.nn.init.xavier_uniform_(policy[2].weight)
+    torch.nn.init.xavier_uniform_(policy[4].weight)
+    policy_optimizer = torch.optim.Adam(
+        policy.parameters(), lr=args.lr, eps=args.adam_eps
+    )
+
+    def make_q_func_with_optimizer():
+        q_func = nn.Sequential(
+            pfrl.nn.ConcatObsAndAction(),
+            nn.Linear(obs_space.low.size + action_size, args.n_hidden_channels),
+            nn.ReLU(),
+            *make_n_hidden_layers(args.n_hidden_layers, args.n_hidden_channels, nn.ReLU),
+            nn.Linear(args.n_hidden_channels, 1),
+        )
+        torch.nn.init.xavier_uniform_(q_func[1].weight)
+        torch.nn.init.xavier_uniform_(q_func[3].weight)
+        torch.nn.init.xavier_uniform_(q_func[5].weight)
+        q_func_optimizer = torch.optim.Adam(
+            q_func.parameters(), lr=args.lr, eps=args.adam_eps
+        )
+        return q_func, q_func_optimizer
+
+    q_func1, q_func1_optimizer = make_q_func_with_optimizer()
+    q_func2, q_func2_optimizer = make_q_func_with_optimizer()
+
+    rbuf = replay_buffers.ReplayBuffer(10 ** 6, num_steps=args.n_step_return)
+
+    def burnin_action_func():
+        """Select random actions until model is updated one or more times."""
+        return np.random.uniform(action_space.low, action_space.high).astype(np.float32)
+
+    # Hyperparameters in http://arxiv.org/abs/1802.09477
+    agent = pfrl.agents.SoftActorCritic(
+        policy,
+        q_func1,
+        q_func2,
+        policy_optimizer,
+        q_func1_optimizer,
+        q_func2_optimizer,
+        rbuf,
+        gamma=args.discount,
+        update_interval=args.update_interval,
+        replay_start_size=args.replay_start_size,
+        gpu=args.gpu,
+        minibatch_size=args.batch_size,
+        burnin_action_func=burnin_action_func,
+        entropy_target=-action_size,
+        temperature_optimizer_lr=args.lr,
+    )
+
+    if len(args.load) > 0:
         agent.load(args.load)
 
     if args.demo:
-        eval_stats = experiments.eval_performance(
-            env=make_batch_env(test=True),
-            agent=agent,
-            n_steps=None,
-            n_episodes=args.eval_n_runs,
-        )
-        print(
-            "n_runs: {} mean: {} median: {} stdev: {}".format(
-                args.eval_n_runs,
-                eval_stats["mean"],
-                eval_stats["median"],
-                eval_stats["stdev"],
+        if args.diayn_use:
+            for z in range(args.diayn_n_skills):
+                eval_env = make_env(args, seed=0, test=True, augment_with_z=z)
+                eval_stats = experiments.eval_performance(
+                    env=eval_env,
+                    agent=agent,
+                    n_steps=None,
+                    n_episodes=args.eval_n_runs,
+                    max_episode_len=timestep_limit,
+                )
+                print(
+                    "z: {} n_runs: {} mean: {} median: {} stdev {}".format(
+                        z,
+                        args.eval_n_runs,
+                        eval_stats["mean"],
+                        eval_stats["median"],
+                        eval_stats["stdev"],
+                    )
+                )
+        else:
+
+            eval_env = make_env(args, seed=0, test=True)
+            eval_stats = experiments.eval_performance(
+                env=eval_env,
+                agent=agent,
+                n_steps=None,
+                n_episodes=args.eval_n_runs,
+                max_episode_len=timestep_limit,
             )
-        )
+            print(
+                "n_runs: {} mean: {} median: {} stdev {}".format(
+                    args.eval_n_runs,
+                    eval_stats["mean"],
+                    eval_stats["median"],
+                    eval_stats["stdev"],
+                )
+            )
     else:
-        step_hooks = []
+        train_env = make_batch_env(test=False, discriminator=discriminator)
+        eval_env = make_batch_env(test=True, discriminator=discriminator, is_evaluator=True)
 
-        # Linearly decay the learning rate to zero
-        def lr_setter(env, agent, value):
-            for param_group in agent.optimizer.param_groups:
-                param_group["lr"] = value
+        from pfrl.experiments import EvaluationHook
+        class DIAYNEvalHook(EvaluationHook):
+            def __init__(self):
+                self.support_train_agent = True
+                self.support_train_agent_batch = True
+                self.support_train_agent_async = True
 
-        step_hooks.append(
-            experiments.LinearInterpolationHook(args.steps, args.lr, 0, lr_setter)
-        )
+            def __call__(self, env, agent, evaluator, step, eval_stats, agent_stats, env_stats):
+                for z, rew in zip(env._z, env.rew_counter):
+                    env.logger.info(
+                        "z:{} rew:{}".format(  # NOQA
+                            z, rew
+                        )
+                    )
+                env.rew_counter = np.zeros((env.n_skills,))
 
         experiments.train_agent_batch_with_evaluation(
             agent=agent,
-            env=make_batch_env(False, discriminator),
-            eval_env=make_batch_env(True, discriminator),
+            env=train_env,
+            eval_env=eval_env,
             outdir=args.outdir,
             steps=args.steps,
             eval_n_steps=None,
             eval_n_episodes=args.eval_n_runs,
-            checkpoint_freq=args.checkpoint_frequency,
+            evaluation_hooks=[DIAYNEvalHook()],
             eval_interval=args.eval_interval,
             log_interval=args.log_interval,
-            save_best_so_far_agent=False,
-            step_hooks=step_hooks,
+            max_episode_len=timestep_limit,
+            use_tensorboard=True
         )
 
 
