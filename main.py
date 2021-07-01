@@ -11,8 +11,9 @@ import torch
 from torch import distributions, nn
 
 import pfrl
-from diayn.discriminator import CrossEntropyDiscriminator
-from diayn.vecwrapper import DIAYNWrapper
+import wrappers
+from diayn.discriminator import CrossEntropyDiscriminator, BinaryEntropyDiscriminator
+from diayn.vecwrapper import DIAYNWrapper, DIAYNVecEval
 from pfrl import experiments, replay_buffers, utils
 from pfrl.nn.lmbda import Lambda
 
@@ -30,6 +31,7 @@ def make_env(args, seed, test, augment_with_z=False):
     # Cast observations to float32 because our model uses float32
     env = pfrl.wrappers.CastObservationToFloat32(env)
     # Normalize action space to [-1, 1]^n
+    env = wrappers.DiscreteToBoxActionSpace(env)
     env = pfrl.wrappers.NormalizeActionSpace(env)
     if args.monitor:
         out_dir_for_demos = args.outdir
@@ -64,7 +66,7 @@ def main():
     parser.add_argument(
         "--env",
         type=str,
-        default="HalfCheetah-v3",
+        default="MountainCarContinuous-v0",
         help="OpenAI Gym env to perform algorithm on.",
     )
     parser.add_argument(
@@ -163,6 +165,12 @@ def main():
         help="If true, will use a one-hot of z to augment the observation instead of just z's value.",
     )
     parser.add_argument(
+        "--diayn-use-bce",
+        action="store_true",
+        default=False,
+        help="If true, will use BinaryCrossEntropy instead of CrossEntropy.",
+    )
+    parser.add_argument(
         "--note",
         type=float,
         default=10.0,
@@ -188,20 +196,27 @@ def main():
     # Set different random seeds for different subprocesses.
     # If seed=0 and processes=4, subprocess seeds are [0, 1, 2, 3].
     # If seed=1 and processes=4, subprocess seeds are [4, 5, 6, 7].
-    process_seeds = np.arange(args.num_envs) + args.seed * args.num_envs
+    process_seeds = np.arange(args.diayn_n_skills) + args.seed * args.num_envs
     assert process_seeds.max() < 2 ** 32
 
     def make_batch_env(test, discriminator=None, force_no_diayn=False, is_evaluator=False):
 
+        num_envs = args.num_envs
+        if is_evaluator:
+            num_envs = args.diayn_n_skills
+
         env = pfrl.envs.MultiprocessVectorEnv(
             [
                 functools.partial(make_env, args, process_seeds[idx], test)
-                for idx, env in enumerate(range(args.num_envs))
+                for idx, env in enumerate(range(num_envs))
             ]
         )
 
         if args.diayn_use and force_no_diayn is not True:
-            env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, 0, is_evaluator=is_evaluator, oh_concat=args.diayn_concat_z_oh)
+            if is_evaluator:
+                env = DIAYNVecEval(env, discriminator, args.diayn_n_skills, oh_concat=args.diayn_concat_z_oh)
+            else:
+                env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, oh_concat=args.diayn_concat_z_oh)
         return env
 
     discriminator = None
@@ -212,7 +227,9 @@ def main():
         print("Old action space", sample_env.action_space)
         del sample_env
 
-        discriminator = CrossEntropyDiscriminator(
+        disc_func = CrossEntropyDiscriminator if args.diayn_use_bce is False else BinaryEntropyDiscriminator
+
+        discriminator = disc_func(
             input_size=obs_space,
             hidden_channels=args.n_hidden_channels,
             hidden_layers=args.n_hidden_layers,
@@ -247,7 +264,7 @@ def main():
     policy = nn.Sequential(
         nn.Linear(obs_space.low.size, args.n_hidden_channels),
         nn.ReLU(),
-        *make_n_hidden_layers(args.n_hidden_layers, args.n_hidden_channels),
+        *make_n_hidden_layers(args.n_hidden_layers, args.n_hidden_channels, nn.ReLU),
         nn.Linear(args.n_hidden_channels, action_size * 2),
         Lambda(squashed_diagonal_gaussian_head),
     )
@@ -263,7 +280,7 @@ def main():
             pfrl.nn.ConcatObsAndAction(),
             nn.Linear(obs_space.low.size + action_size, args.n_hidden_channels),
             nn.ReLU(),
-            *make_n_hidden_layers(args.n_hidden_layers, args.n_hidden_channels),
+            *make_n_hidden_layers(args.n_hidden_layers, args.n_hidden_channels, nn.ReLU),
             nn.Linear(args.n_hidden_channels, 1),
         )
         torch.nn.init.xavier_uniform_(q_func[1].weight)
@@ -344,14 +361,34 @@ def main():
                 )
             )
     else:
+        train_env = make_batch_env(test=False, discriminator=discriminator)
+        eval_env = make_batch_env(test=True, discriminator=discriminator, is_evaluator=True)
+
+        from pfrl.experiments import EvaluationHook
+        class DIAYNEvalHook(EvaluationHook):
+            def __init__(self):
+                self.support_train_agent = True
+                self.support_train_agent_batch = True
+                self.support_train_agent_async = True
+
+            def __call__(self, env, agent, evaluator, step, eval_stats, agent_stats, env_stats):
+                for z, rew in zip(env._z, env.rew_counter):
+                    env.logger.info(
+                        "z:{} rew:{}".format(  # NOQA
+                            z, rew
+                        )
+                    )
+                env.rew_counter = np.zeros((env.n_skills,))
+
         experiments.train_agent_batch_with_evaluation(
             agent=agent,
-            env=make_batch_env(test=False, discriminator=discriminator),
-            eval_env=make_batch_env(test=True, discriminator=discriminator, is_evaluator=True),
+            env=train_env,
+            eval_env=eval_env,
             outdir=args.outdir,
             steps=args.steps,
             eval_n_steps=None,
             eval_n_episodes=args.eval_n_runs,
+            evaluation_hooks=[DIAYNEvalHook()],
             eval_interval=args.eval_interval,
             log_interval=args.log_interval,
             max_episode_len=timestep_limit,
