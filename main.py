@@ -66,13 +66,13 @@ def main():
     parser.add_argument(
         "--env",
         type=str,
-        default="MountainCarContinuous-v0",
+        default="HalfCheetah-v2",
         help="OpenAI Gym env to perform algorithm on.",
     )
     parser.add_argument(
         "--num-envs", type=int, default=4, help="Number of envs run in parallel."
     )
-    parser.add_argument("--seed", type=int, default=0, help="Random seed [0, 2 ** 32)")
+    parser.add_argument("--seed", type=int, default=100, help="Random seed [0, 2 ** 32)")
     parser.add_argument(
         "--gpu", type=int, default=0, help="GPU to use, set to -1 if no GPU."
     )
@@ -82,7 +82,7 @@ def main():
     parser.add_argument(
         "--steps",
         type=int,
-        default=10 ** 7,
+        default=(10 ** 5)*5,
         help="Total number of timesteps to train the agent.",
     )
     parser.add_argument(
@@ -109,7 +109,7 @@ def main():
         default=1,
         help="Interval in timesteps between model updates.",
     )
-    parser.add_argument("--batch-size", type=int, default=256, help="Minibatch size")
+    parser.add_argument("--batch-size", type=int, default=128, help="Minibatch size")
     parser.add_argument(
         "--render", action="store_true", help="Render env states in a GUI window."
     )
@@ -131,13 +131,13 @@ def main():
     parser.add_argument(
         "--n-hidden-channels",
         type=int,
-        default=400,    # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
+        default=300,    # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
         help="Number of hidden channels of NN models.",
     )
     parser.add_argument(
         "--n-hidden-layers",
         type=int,
-        default=2,
+        default=1,
         # https://github.com/pfnet/pfrl/blob/44bf2e483f5a2f30be7fd062545de306247699a1/examples/gym/train_reinforce_gym.py#L84
         help="Number of hidden channels of NN models.",
     )
@@ -149,7 +149,7 @@ def main():
     parser.add_argument(
         "--diayn-use",
         action="store_true",
-        default=False,
+        default=True,
         help="Wether or not we should use diayn",
     )
     parser.add_argument(
@@ -161,7 +161,7 @@ def main():
     parser.add_argument(
         "--diayn-concat-z-oh",
         action="store_true",
-        default=False,
+        default=True,
         help="If true, will use a one-hot of z to augment the observation instead of just z's value.",
     )
     parser.add_argument(
@@ -172,8 +172,8 @@ def main():
     )
     parser.add_argument(
         "--note",
-        type=float,
-        default=10.0,
+        type=str,
+        default="10.0",
         help="Normal",
         # note: normally, this is done to the max entropy objective. In our version, we use PFRL, so there's a bit of
         # infrastructure obfuscating the objective. Instead, we scale the other term (the expectation, aka the intrisic

@@ -32,6 +32,8 @@ class CrossEntropyDiscriminator(nn.Module):
         self.out_nonlinearity = output_nonlinearity()
         self.trainer = CrossEntropyTrainer(self)
         self.n_skills = n_skills
+
+
         print(self)
 
     def forward(self, input):
@@ -77,7 +79,7 @@ class CrossEntropyTrainer():
         with torch.no_grad():
             self.losses.append(loss.cpu().numpy())
 
-class BinaryEntropyDiscriminator(nn.Module):
+class BinaryEntropyDiscriminator(nn.Module):    # todo change tanh to relu
     def __init__(self, input_size, hidden_channels, hidden_layers, n_skills, hidden_nonlinearity=nn.Tanh, output_nonlinearity=nn.Sigmoid):
         super().__init__()
 
@@ -117,7 +119,7 @@ class BinaryEntropyDiscriminator(nn.Module):
             reward_pls = torch.log(scores)
 
             reward_pls = reward_pls.squeeze()
-            reward_pls += add_to
+            reward_pls += add_to    # todo try without this
 
         return reward_pls
 
