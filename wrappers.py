@@ -1,5 +1,7 @@
 import gym
 
+from diayn.common import augment_obs
+
 
 class DiscreteToBoxActionSpace(gym.ActionWrapper):
     def __init__(self, env):
@@ -18,3 +20,11 @@ class DiscreteToBoxActionSpace(gym.ActionWrapper):
         from math import floor
         action = floor(action)
         return action
+
+class AugmentWithZWrapper(gym.ObservationWrapper):
+    def __init__(self, env, augmentation_vector_len):
+        super().__init__(env)
+        self.augmentation_vector_len = augmentation_vector_len
+
+    def observation(self, observation):
+        augment_obs(observation, self.env._z, self.augmentation_vector_len)

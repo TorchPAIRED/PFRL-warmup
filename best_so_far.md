@@ -1,0 +1,1 @@
+HalfCheetah v3: cross ent, 0.1 fixed temp, 675 rew

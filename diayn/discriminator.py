@@ -30,9 +30,11 @@ class CrossEntropyDiscriminator(nn.Module):
 
         self.out_layer = nn.Linear(hidden_channels, n_skills)
         self.out_nonlinearity = output_nonlinearity()
-        self.trainer = CrossEntropyTrainer(self)
-        self.n_skills = n_skills
 
+        self.daiyn_optimizer = torch.optim.Adam(self.parameters(), lr=3E-4)  # todo pass LR etc
+        self.daiyn_loss = nn.CrossEntropyLoss()
+
+        self.n_skills = n_skills
 
         print(self)
 
@@ -45,42 +47,34 @@ class CrossEntropyDiscriminator(nn.Module):
         logits = self.out_nonlinearity(linear_output)
         return logits
 
-    def get_score(self, input, labels, add_to):
+    def get_score(self, input, labels, n_skills):
+        labels = labels.cuda()
         with torch.no_grad():
-            logits = self(input).cpu()
+            logits = self(input)
 
             from torch.nn.functional import cross_entropy
             reward_pls = -1 * cross_entropy(logits, labels, reduction="none")
-            reward_pls += add_to
+
+            log_p_z = torch.log(torch.tensor(1.0 / n_skills) + 1E-6)
+            reward_pls = reward_pls - log_p_z
+
         return reward_pls
 
-    def train_on_batch(self, obss, labels, bad_obss):
-        self.trainer.train(obss, labels, bad_obss)
-
-class CrossEntropyTrainer():
-    def __init__(self, discriminator):
-        # NN stuff
-        self.discriminator = discriminator
-        self.daiyn_optimizer = torch.optim.Adam(discriminator.parameters(), lr=3E-4)  # todo pass LR etc
-        self.daiyn_loss = nn.CrossEntropyLoss()
-        self.losses = collections.deque(maxlen=600)
-
-    def train(self, obss, labels, bad_obss):
+    def train_on_batch(self, obss, labels, bad_obss):   # bad_obss useless here
         zs = labels.cuda()
 
+        # note: seems to do one training step for each env step https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L446
+        # ==> link training to env.step
         self.daiyn_optimizer.zero_grad()
 
-        logits = self.discriminator(obss)
+        logits = self(obss)
         loss = self.daiyn_loss(logits, zs)
 
         loss.backward()
         self.daiyn_optimizer.step()
 
-        with torch.no_grad():
-            self.losses.append(loss.cpu().numpy())
-
-class BinaryEntropyDiscriminator(nn.Module):    # todo change tanh to relu
-    def __init__(self, input_size, hidden_channels, hidden_layers, n_skills, hidden_nonlinearity=nn.Tanh, output_nonlinearity=nn.Sigmoid):
+class BinaryEntropyDiscriminator(nn.Module):
+    def __init__(self, input_size, hidden_channels, hidden_layers, n_skills, hidden_nonlinearity=nn.LeakyReLU, output_nonlinearity=nn.Sigmoid):
         super().__init__()
 
         input_size = np.array(list(input_size)).flatten()[0] + n_skills     # because we need to augment with skill
@@ -93,8 +87,11 @@ class BinaryEntropyDiscriminator(nn.Module):    # todo change tanh to relu
 
         self.out_layer = nn.Linear(hidden_channels, 1)
         self.out_nonlinearity = nn.Identity() # output_nonlinearity() no sigmoid output because we're using BCEWithLogits
+
         print(self)
-        self.trainer = BinaryCrossEntropyTrainer(self)
+
+        self.daiyn_optimizer = torch.optim.Adam(self.parameters(), lr=3E-4)  # todo pass LR etc
+        self.daiyn_loss = nn.BCEWithLogitsLoss()
 
         self.n_skills = n_skills
 
@@ -110,7 +107,7 @@ class BinaryEntropyDiscriminator(nn.Module):    # todo change tanh to relu
         obss = torch.tensor(obss).cuda().float()
         return obss
 
-    def get_score(self, input, labels, add_to):
+    def get_score(self, input, labels, n_skills):   # n_skills ignored
         with torch.no_grad():
             preprocessed = self.preprocess(input, labels)
             logits = self(preprocessed)
@@ -119,35 +116,20 @@ class BinaryEntropyDiscriminator(nn.Module):    # todo change tanh to relu
             reward_pls = torch.log(scores)
 
             reward_pls = reward_pls.squeeze()
-            reward_pls += add_to    # todo try without this
 
         return reward_pls
 
     def train_on_batch(self, obss, labels, bad_obss):
         good_obss = self.preprocess(obss, labels)
         bad_obss = self.preprocess(bad_obss, labels)
-        self.trainer.train(good_obss, bad_obss)
 
-class BinaryCrossEntropyTrainer():
-    def __init__(self, discriminator):
-        # NN stuff
-        self.discriminator = discriminator
-        self.daiyn_optimizer = torch.optim.Adam(discriminator.parameters(), lr=3E-4)  # todo pass LR etc
-        self.daiyn_loss = nn.BCEWithLogitsLoss()
-        self.losses = collections.deque(maxlen=600)
-
-    def train(self, good_obss, bad_obss):
-        # note: seems to do one training step for each env step https://github.com/haarnoja/sac/blob/8258e33633c7e37833cc39315891e77adfbe14b2/sac/algos/diayn.py#L446
-        # ==> link training to env.step
         self.daiyn_optimizer.zero_grad()
 
-        good_logits = self.discriminator(good_obss)
-        bad_logits = self.discriminator(bad_obss)
+        good_logits = self(good_obss)
+        bad_logits = self(bad_obss)
 
         loss = self.daiyn_loss(good_logits, torch.ones((len(good_logits), 1)).cuda()) + \
                self.daiyn_loss(bad_logits, torch.zeros((len(bad_logits), 1)).cuda())
 
         loss.backward()
         self.daiyn_optimizer.step()
-        with torch.no_grad():
-            self.losses.append(loss.cpu().numpy())

@@ -13,7 +13,7 @@ from torch import distributions, nn
 import pfrl
 import wrappers
 from diayn.discriminator import CrossEntropyDiscriminator, BinaryEntropyDiscriminator
-from diayn.vecwrapper import DIAYNWrapper, DIAYNVecEval
+from diayn.vecwrapper import DIAYNWrapper, ZAugmentationVecWrapper
 from pfrl import experiments, replay_buffers, utils
 from pfrl.nn.lmbda import Lambda
 
@@ -31,7 +31,7 @@ def make_env(args, seed, test, augment_with_z=False):
     # Cast observations to float32 because our model uses float32
     env = pfrl.wrappers.CastObservationToFloat32(env)
     # Normalize action space to [-1, 1]^n
-    env = wrappers.DiscreteToBoxActionSpace(env)
+    #env = wrappers.DiscreteToBoxActionSpace(env)
     env = pfrl.wrappers.NormalizeActionSpace(env)
     if args.monitor:
         out_dir_for_demos = args.outdir
@@ -44,9 +44,9 @@ def make_env(args, seed, test, augment_with_z=False):
     if args.render:
         env = pfrl.wrappers.Render(env, mode="human")
 
-    if augment_with_z is not False:
-        from diayn.evalwrapper import DIAYNAugmentationWrapper
-        env = DIAYNAugmentationWrapper(env, augment_with_z=augment_with_z, oh_len=1 if not args.diayn_concat_z_oh else args.diayn_n_skills, out_dir=out_dir_for_demos)
+    #if augment_with_z is not False: fixme
+    #    from diayn.evalwrapper import DIAYNAugmentationWrapper
+    #    env = DIAYNAugmentationWrapper(env, augment_with_z=augment_with_z, oh_len=1 if not args.diayn_concat_z_oh else args.diayn_n_skills, out_dir=out_dir_for_demos)
 
     return env
 
@@ -66,7 +66,7 @@ def main():
     parser.add_argument(
         "--env",
         type=str,
-        default="HalfCheetah-v2",
+        default="HalfCheetah-v3",
         help="OpenAI Gym env to perform algorithm on.",
     )
     parser.add_argument(
@@ -171,6 +171,12 @@ def main():
         help="If true, will use BinaryCrossEntropy instead of CrossEntropy.",
     )
     parser.add_argument(
+        "--diayn-use-static-temperature",
+        type=float,
+        default=-1,
+        help="If true, will use a static temperature (simulates entropy scalaing from DIAYN paper)",
+    )
+    parser.add_argument(
         "--note",
         type=str,
         default="10.0",
@@ -199,7 +205,7 @@ def main():
     process_seeds = np.arange(args.diayn_n_skills) + args.seed * args.num_envs
     assert process_seeds.max() < 2 ** 32
 
-    def make_batch_env(test, discriminator=None, force_no_diayn=False, is_evaluator=False):
+    def make_batch_env(test, discriminator=None, is_evaluator=False):
 
         num_envs = args.num_envs
         if is_evaluator:
@@ -212,22 +218,26 @@ def main():
             ]
         )
 
-        if args.diayn_use and force_no_diayn is not True:
+        if args.diayn_use:
             if is_evaluator:
-                env = DIAYNVecEval(env, discriminator, args.diayn_n_skills, oh_concat=args.diayn_concat_z_oh)
+                env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, is_eval=is_evaluator)
             else:
-                env = DIAYNWrapper(env, discriminator, args.diayn_n_skills, oh_concat=args.diayn_concat_z_oh)
+                env = DIAYNWrapper(env, discriminator, args.diayn_n_skills)
+
+            env = ZAugmentationVecWrapper(env, 1 if not args.diayn_concat_z_oh else args.diayn_n_skills)
+
         return env
 
     discriminator = None
     if args.diayn_use:
-        sample_env = make_batch_env(test=False, discriminator=None, force_no_diayn=True)
+        sample_env = make_batch_env(test=False, discriminator=None)
+        sample_env = sample_env.env # remove augmentation wrapper
         obs_space = sample_env.observation_space.shape
         print("Old observation space", sample_env.observation_space)
         print("Old action space", sample_env.action_space)
         del sample_env
 
-        disc_func = CrossEntropyDiscriminator if args.diayn_use_bce is False else BinaryEntropyDiscriminator
+        disc_func = BinaryEntropyDiscriminator if args.diayn_use_bce else CrossEntropyDiscriminator
 
         discriminator = disc_func(
             input_size=obs_space,
@@ -258,8 +268,6 @@ def main():
         return distributions.transformed_distribution.TransformedDistribution(
             base_distribution, [distributions.transforms.TanhTransform(cache_size=1)]
         )
-
-
 
     policy = nn.Sequential(
         nn.Linear(obs_space.low.size, args.n_hidden_channels),
@@ -315,8 +323,9 @@ def main():
         gpu=args.gpu,
         minibatch_size=args.batch_size,
         burnin_action_func=burnin_action_func,
-        entropy_target=-action_size,
-        temperature_optimizer_lr=args.lr,
+        entropy_target=None if args.diayn_use_static_temperature != -1 else -action_size,
+        initial_temperature=args.diayn_use_static_temperature if args.diayn_use_static_temperature != -1 else 1.0,
+        temperature_optimizer_lr=None if args.diayn_use_static_temperature != -1 else args.lr,
     )
 
     if len(args.load) > 0:
@@ -372,13 +381,18 @@ def main():
                 self.support_train_agent_async = True
 
             def __call__(self, env, agent, evaluator, step, eval_stats, agent_stats, env_stats):
-                for z, rew in zip(env._z, env.rew_counter):
+                env = env.env   # unwrap the z-augmentation wrapper
+
+                report = list(zip(env._z, env.extrinsic_rew_counter))
+                report = sorted(report, key=lambda x:x[0])
+
+                for z, rew in report:
                     env.logger.info(
                         "z:{} rew:{}".format(  # NOQA
                             z, rew
                         )
                     )
-                env.rew_counter = np.zeros((env.n_skills,))
+                env.reset()
 
         experiments.train_agent_batch_with_evaluation(
             agent=agent,
